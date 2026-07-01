@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Secure Appointment Portal</title>
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <header class="header">
+    <h1>Secure Appointment Portal</h1>
+    <p>Book your appointment in a few simple steps.</p>
+  </header>
+
+  <main class="main">
+    <section class="booking-section">
+      <form id="bookingForm" novalidate aria-label="Appointment booking form">
+        <!-- Name Field -->
+        <div class="form-group">
+          <label for="name">
+            Full Name <span aria-hidden="true">*</span>
+          </label>
+          <input 
+            type="text" 
+            id="name" 
+            name="name" 
+            required 
+            placeholder="Enter your full name"
+            autocomplete="name"
+            aria-required="true"
+            aria-describedby="nameError"
+          >
+          <div id="nameError" class="error-message" role="alert" aria-live="polite"></div>
+        </div>
+
+        <!-- Email Field -->
+        <div class="form-group">
+          <label for="email">
+            Email Address <span aria-hidden="true">*</span>
+          </label>
+          <input 
+            type="email" 
+            id="email" 
+            name="email" 
+            required 
+            placeholder="Enter your email address"
+            autocomplete="email"
+            aria-required="true"
+            aria-describedby="emailError"
+          >
+          <div id="emailError" class="error-message" role="alert" aria-live="polite"></div>
+        </div>
+
+        <!-- Mobile Field -->
+        <div class="form-group">
+          <label for="mobile">
+            Mobile Number <span aria-hidden="true">*</span>
+          </label>
+          <input 
+            type="tel" 
+            id="mobile" 
+            name="mobile" 
+            required 
+            placeholder="10-digit mobile number"
+            autocomplete="tel"
+            aria-required="true"
+            aria-describedby="mobileError"
+            inputmode="numeric"
+            pattern="[6-9][0-9]{9}"
+          >
+          <div id="mobileError" class="error-message" role="alert" aria-live="polite"></div>
+        </div>
+
+        <!-- Remarks Field -->
+        <div class="form-group">
+          <label for="remarks">
+            Remarks <span class="optional">(Optional)</span>
+          </label>
+          <textarea 
+            id="remarks" 
+            name="remarks" 
+            rows="2" 
+            placeholder="Any special requirements or information"
+            aria-describedby="remarksHint"
+          ></textarea>
+          <div id="remarksHint" class="hint">Optional field</div>
+        </div>
+
+        <!-- Date Field -->
+        <div class="form-group">
+          <label for="appointmentDate">
+            Preferred Date <span aria-hidden="true">*</span>
+          </label>
+          <input 
+            type="date" 
+            id="appointmentDate" 
+            name="appointmentDate" 
+            required
+            aria-required="true"
+            aria-describedby="dateError"
+          >
+          <div id="dateError" class="error-message" role="alert" aria-live="polite"></div>
+        </div>
+
+        <!-- Time Slots Field -->
+        <div class="form-group">
+          <label for="appointmentTime">
+            Available Time Slots <span aria-hidden="true">*</span>
+          </label>
+          <div id="slotContainer">
+            <p class="slot-placeholder">Please select a date.</p>
+          </div>
+          <select id="appointmentTime" name="appointmentTime" required style="display: none;" aria-required="true" aria-describedby="timeError">
+            <option value="">Select a time slot</option>
+          </select>
+          <div id="timeError" class="error-message" role="alert" aria-live="polite"></div>
+        </div>
+
+        <!-- General Error -->
+        <div id="generalError" class="error-message general-error" role="alert" aria-live="assertive"></div>
+
+        <!-- Submit Button -->
+        <button type="submit" id="submitBtn" class="btn-primary">
+          Confirm Appointment
+        </button>
+      </form>
+    </section>
+  </main>
+
+  <!-- Loading Overlay -->
+  <div id="loadingOverlay" class="loading-overlay" hidden role="alert" aria-live="polite">
+    <div class="loading-content">
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="loadingMessage">Checking available time slots...</p>
+    </div>
+  </div>
+
+  <!-- Success Screen -->
+  <div id="successScreen" class="success-screen" hidden role="alert" aria-live="assertive">
+    <div class="success-content">
+      <div class="success-icon" aria-hidden="true">✓</div>
+      <h2>Appointment Booked Successfully</h2>
+      <p>A confirmation email has been sent.</p>
+      <p>Your Google Calendar invitation contains the Google Meet link.</p>
+      <p class="redirect-message">You will now be redirected...</p>
+      <button id="returnBtn" class="btn-secondary">Return to Website</button>
+    </div>
+  </div>
+
+  <footer class="footer">
+    <p>&copy; <span id="currentYear"></span> Secure Appointment Portal. All rights reserved.</p>
+  </footer>
+
+  <?!= include('JavaScript'); ?>
+</body>
+</html>

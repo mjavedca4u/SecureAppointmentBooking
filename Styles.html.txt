@@ -1,0 +1,43 @@
+/**
+ * Returns website configuration from Sites sheet
+ * @param {string} siteCode
+ * @returns {Object|null}
+ */
+function getSiteConfig(siteCode) {
+
+  if (!siteCode) return null;
+
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName("Sites");
+
+  if (!sheet) {
+    throw new Error("Sites sheet not found.");
+  }
+
+  const data = sheet.getDataRange().getValues();
+
+  for (let i = 1; i < data.length; i++) {
+
+    const code = String(data[i][0]).trim().toUpperCase();
+    const websiteName = data[i][1];
+    const websiteURL = data[i][2];
+    const thankYouURL = data[i][3];
+    const active = String(data[i][4]).trim().toUpperCase();
+
+    if (code === siteCode.toUpperCase()) {
+
+      if (active !== "YES") {
+        throw new Error("Website is inactive.");
+      }
+
+      return {
+        siteCode: code,
+        websiteName: websiteName,
+        websiteURL: websiteURL,
+        thankYouURL: thankYouURL
+      };
+    }
+  }
+
+  return null;
+}

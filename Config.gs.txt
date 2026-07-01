@@ -1,0 +1,1378 @@
+// ============================================
+// SECURE APPOINTMENT PORTAL v2.0
+// Complete Backend Application
+// ============================================
+
+// ============================================
+// CONFIGURATION REFERENCES
+// ============================================
+
+// Configuration loaded from Settings sheet
+// No hardcoded values
+
+// ============================================
+// SHEET HELPERS
+// ============================================
+
+/**
+ * Get the spreadsheet instance
+ * @returns {SpreadsheetApp.Spreadsheet} Spreadsheet object
+ */
+function getSpreadsheet() {
+  return SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+}
+
+/**
+ * Get or create a sheet
+ * @param {string} name - Sheet name
+ * @param {Array} headers - Column headers
+ * @returns {Sheet} Sheet object
+ */
+function getOrCreateSheet(name, headers) {
+  const ss = getSpreadsheet();
+  let sheet = ss.getSheetByName(name);
+  
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    if (headers) {
+      sheet.appendRow(headers);
+    }
+  }
+  
+  return sheet;
+}
+
+/**
+ * Get settings from Settings sheet
+ * @returns {Object} Settings object
+ */
+function getSettings() {
+  try {
+    const sheet = getOrCreateSheet('Settings', ['Setting', 'Value']);
+    const data = sheet.getDataRange().getValues();
+    const settings = {};
+    
+    for (let i = 1; i < data.length; i++) {
+      const key = data[i][0];
+      const value = data[i][1];
+      if (key) {
+        settings[key] = value;
+      }
+    }
+    
+    // Set defaults for missing settings
+    const defaults = {
+      BookingMode: 'OPEN',
+      SlotDuration: '10',
+      BufferTime: '15',
+      TimeZone: 'Asia/Kolkata',
+      DefaultStartTime: '11:00',
+      DefaultEndTime: '18:00',
+      RedirectDelay: '3',
+      MaintenanceMessage: 'Booking is temporarily unavailable. Please try again later.',
+      RedirectDefault: ''
+    };
+    
+    for (const [key, value] of Object.entries(defaults)) {
+      if (!settings[key]) {
+        settings[key] = value;
+        // Save default to sheet
+        sheet.appendRow([key, value]);
+      }
+    }
+    
+    return settings;
+  } catch (error) {
+    console.error('Error loading settings:', error);
+    throw new Error('Failed to load settings');
+  }
+}
+
+/**
+ * Get working hours from WorkingHours sheet
+ * @param {string} day - Day of week (Monday-Sunday)
+ * @returns {Object} Working hours object
+ */
+function getWorkingHours(day) {
+  try {
+    const sheet = getOrCreateSheet('WorkingHours', ['Day', 'Enabled', 'Start Time', 'End Time']);
+    const data = sheet.getDataRange().getValues();
+    
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === day) {
+        return {
+          enabled: data[i][1] && data[i][1].toUpperCase() === 'YES',
+          startTime: data[i][2] || '11:00',
+          endTime: data[i][3] || '18:00'
+        };
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error loading working hours:', error);
+    return null;
+  }
+}
+
+/**
+ * Get all working hours from WorkingHours sheet
+ * @returns {Object} Working hours for all days
+ */
+function getAllWorkingHours() {
+  try {
+    const sheet = getOrCreateSheet('WorkingHours', ['Day', 'Enabled', 'Start Time', 'End Time']);
+    const data = sheet.getDataRange().getValues();
+    const workingHours = {};
+    
+    for (let i = 1; i < data.length; i++) {
+      const day = data[i][0];
+      if (day) {
+        workingHours[day] = {
+          enabled: data[i][1] && data[i][1].toUpperCase() === 'YES',
+          startTime: data[i][2] || '11:00',
+          endTime: data[i][3] || '18:00'
+        };
+      }
+    }
+    
+    return workingHours;
+  } catch (error) {
+    console.error('Error loading working hours:', error);
+    return {};
+  }
+}
+
+/**
+ * Check if a date is blocked
+ * @param {string} dateStr - Date in YYYY-MM-DD format
+ * @returns {Object} Blocked status and reason
+ */
+function isDateBlocked(dateStr) {
+  try {
+    // Check BlockedDates
+    const blockedSheet = getOrCreateSheet('BlockedDates', ['Date', 'Enabled', 'Reason']);
+    const blockedData = blockedSheet.getDataRange().getValues();
+    
+    for (let i = 1; i < blockedData.length; i++) {
+      const date = blockedData[i][0];
+      const enabled = blockedData[i][1] && blockedData[i][1].toUpperCase() === 'YES';
+      const reason = blockedData[i][2] || 'Date is blocked';
+      
+      if (date && enabled && date === dateStr) {
+        return { blocked: true, reason: reason };
+      }
+    }
+    
+    // Check Holidays (recurring annual holidays)
+    const holidaySheet = getOrCreateSheet('Holidays', ['Month', 'Day', 'Enabled', 'Reason']);
+    const holidayData = holidaySheet.getDataRange().getValues();
+    const dateParts = dateStr.split('-');
+    const month = parseInt(dateParts[1]);
+    const day = parseInt(dateParts[2]);
+    
+    for (let i = 1; i < holidayData.length; i++) {
+      const hMonth = parseInt(holidayData[i][0]);
+      const hDay = parseInt(holidayData[i][1]);
+      const enabled = holidayData[i][2] && holidayData[i][2].toUpperCase() === 'YES';
+      const reason = holidayData[i][3] || 'Holiday';
+      
+      if (hMonth === month && hDay === day && enabled) {
+        return { blocked: true, reason: reason };
+      }
+    }
+    
+    return { blocked: false };
+  } catch (error) {
+    console.error('Error checking blocked date:', error);
+    return { blocked: false };
+  }
+}
+
+/**
+ * Get redirect URL for site code
+ * @param {string} siteCode - Site code (e.g., NGO, ST, LAW)
+ * @returns {string} Redirect URL
+ */
+function getRedirectUrl(siteCode) {
+  try {
+    const settings = getSettings();
+    
+    if (!siteCode) {
+      return settings.RedirectDefault || '';
+    }
+    
+    const sheet = getOrCreateSheet('Redirects', ['SiteCode', 'RedirectURL', 'Active']);
+    const data = sheet.getDataRange().getValues();
+    
+    for (let i = 1; i < data.length; i++) {
+      const code = data[i][0];
+      const url = data[i][1];
+      const active = data[i][2] && data[i][2].toUpperCase() === 'YES';
+      
+      if (code && code.toUpperCase() === siteCode.toUpperCase() && active && url) {
+        return url;
+      }
+    }
+    
+    return settings.RedirectDefault || '';
+  } catch (error) {
+    console.error('Error getting redirect URL:', error);
+    return '';
+  }
+}
+
+// ============================================
+// MAIN ENTRY POINT
+// ============================================
+
+/**
+ * Handles GET requests to the web application
+ * @param {Object} e - Event object containing request parameters
+ * @returns {HtmlOutput} HTML page for the booking form
+ */
+function doGet(e) {
+  try {
+    const settings = getSettings();
+    const bookingMode = settings.BookingMode || 'OPEN';
+    
+    // Check if booking is paused
+    if (bookingMode === 'PAUSED') {
+      return HtmlService.createHtmlOutput(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <style>
+            body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f7fa; }
+            .container { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; max-width: 500px; }
+            .icon { font-size: 48px; margin-bottom: 20px; }
+            h1 { color: #333; font-size: 24px; margin-bottom: 10px; }
+            p { color: #666; line-height: 1.6; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="icon">🔧</div>
+            <h1>Booking Paused</h1>
+            <p>${settings.MaintenanceMessage || 'Booking is temporarily unavailable. Please try again later.'}</p>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+    
+    // Get site code for redirect
+    const siteCode = e && e.parameter && e.parameter.site
+  ? e.parameter.site.toUpperCase().trim()
+  : "";
+
+const site = getSiteConfig(siteCode);
+
+if (!site) {
+
+  return HtmlService.createHtmlOutput(
+    "<h2>Invalid Website</h2><p>Please start your booking from the original website.</p>"
+  );
+
+}
+
+const returnUrl = site.thankYouURL;
+    
+    // Render the booking form template
+    const template = HtmlService.createTemplateFromFile('Index');
+    template.returnUrl = returnUrl;
+    template.siteCode = siteCode;
+    template.bookingMode = bookingMode;
+    
+    return template
+      .evaluate()
+      .setTitle('Book Appointment')
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    
+  } catch (error) {
+    console.error('Error in doGet:', error);
+    return HtmlService.createHtmlOutput(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f7fa; }
+          .container { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; max-width: 400px; }
+          .error { color: #dc3545; font-size: 48px; margin-bottom: 20px; }
+          h1 { color: #333; font-size: 24px; margin-bottom: 10px; }
+          p { color: #666; line-height: 1.6; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="error">⚠️</div>
+          <h1>Service Unavailable</h1>
+          <p>We're experiencing technical difficulties. Please try again later.</p>
+        </div>
+      </body>
+      </html>
+    `);
+  }
+}
+
+// ============================================
+// SHEET OPERATIONS
+// ============================================
+
+/**
+ * Retrieves or creates the Appointments sheet
+ * @returns {Sheet} Google Sheet object
+ */
+function getSheet() {
+  try {
+    const ss = getSpreadsheet();
+    let sheet = ss.getSheetByName('Appointments');
+    
+    if (!sheet) {
+      sheet = ss.insertSheet('Appointments');
+      sheet.appendRow([
+        'Name',
+        'Email',
+        'Mobile',
+        'Remarks',
+        'Appointment Date',
+        'Appointment Time',
+        'Calendar Event ID',
+        'Google Meet Link',
+        'Status',
+        'Created On',
+        'Site Code',
+        'Redirect URL'
+      ]);
+    }
+    
+    return sheet;
+  } catch (error) {
+    console.error('Error accessing sheet:', error);
+    throw new Error('Unable to access appointment sheet');
+  }
+}
+
+/**
+ * Saves booking data to the Google Sheet
+ * @param {Object} data - Booking data from the form
+ * @param {string} eventId - Google Calendar Event ID
+ * @param {string} meetLink - Google Meet URL
+ * @param {string} siteCode - Site code
+ * @param {string} returnUrl - Redirect URL
+ * @returns {boolean} True if saved successfully, false otherwise
+ */
+function saveBooking(data, eventId, meetLink, siteCode, returnUrl) {
+  try {
+    const sheet = getSheet();
+    const now = new Date();
+    const settings = getSettings();
+    const timezone = settings.TimeZone || 'Asia/Kolkata';
+    
+    const row = [
+      data.name,
+      data.email,
+      data.mobile,
+      data.remarks || '',
+      data.appointmentDate,
+      data.appointmentTime,
+      eventId,
+      meetLink || '',
+      'Confirmed',
+      Utilities.formatDate(now, timezone, 'yyyy-MM-dd HH:mm:ss'),
+      siteCode || '',
+      returnUrl || ''
+    ];
+    
+    sheet.appendRow(row);
+    return true;
+  } catch (error) {
+    console.error('Error saving booking:', error);
+    return false;
+  }
+}
+
+// ============================================
+// AVAILABILITY FUNCTIONS
+// ============================================
+
+/**
+ * Converts day name to number (0=Sunday, 1=Monday, etc.)
+ * @param {string} dayName - Day name (e.g., "Monday")
+ * @returns {number} Day number
+ */
+function dayNameToNumber(dayName) {
+  const days = {
+    'Sunday': 0,
+    'Monday': 1,
+    'Tuesday': 2,
+    'Wednesday': 3,
+    'Thursday': 4,
+    'Friday': 5,
+    'Saturday': 6
+  };
+  return days[dayName];
+}
+
+/**
+ * Parse time values from various formats (Date, String, Number)
+ * @param {any} value - Time value to parse
+ * @param {string} fallback - Fallback time string
+ * @returns {Object} Object with hour and minute properties
+ */
+function parseSheetTime(value, fallback) {
+  if (!value) {
+    return parseTimeString(fallback);
+  }
+  
+  // If value is a Date object (Google Sheets time cell)
+  if (value instanceof Date) {
+    return {
+      hour: value.getHours(),
+      minute: value.getMinutes()
+    };
+  }
+  
+  // If value is a string (e.g., "11:00")
+  if (typeof value === 'string') {
+    return parseTimeString(value);
+  }
+  
+  // If value is a number (Excel time format)
+  if (typeof value === 'number') {
+    const totalMinutes = Math.round(value * 24 * 60);
+    const hour = Math.floor(totalMinutes / 60);
+    const minute = totalMinutes % 60;
+    return { hour: hour, minute: minute };
+  }
+  
+  // Default fallback
+  return parseTimeString(fallback);
+}
+
+/**
+ * Parse a time string into hour and minute
+ * @param {string} timeStr - Time string (e.g., "11:00")
+ * @returns {Object} Object with hour and minute properties
+ */
+function parseTimeString(timeStr) {
+  const parts = timeStr.split(':');
+  return {
+    hour: parseInt(parts[0], 10),
+    minute: parseInt(parts[1] || '0', 10)
+  };
+}
+
+/**
+ * Gets available time slots for a specific date
+ * @param {string} dateStr - Date in YYYY-MM-DD format
+ * @returns {Object} Object containing available slots or error message
+ */
+function getAvailableSlots(dateStr) {
+  try {
+    const settings = getSettings();
+    const timezone = settings.TimeZone || 'Asia/Kolkata';
+    const date = new Date(dateStr);
+    const dayOfWeek = date.getDay();
+    
+    // Get day name
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const dayName = dayNames[dayOfWeek];
+    
+    // Check working hours
+    const workingHours = getWorkingHours(dayName);
+    if (!workingHours || !workingHours.enabled) {
+      return { error: 'Selected day is not a working day' };
+    }
+    
+    // Check if date is in the past
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (date < today) {
+      return { error: 'Cannot book past dates' };
+    }
+    
+    // Check if date is blocked or holiday
+    const blocked = isDateBlocked(dateStr);
+    if (blocked.blocked) {
+      return { error: 'Appointments are unavailable on this date: ' + blocked.reason };
+    }
+    
+    // Parse start and end times from working hours
+    const start = parseSheetTime(workingHours.startTime, '11:00');
+    const end = parseSheetTime(workingHours.endTime, '18:00');
+    
+    const startHour = start.hour;
+    const startMinute = start.minute;
+    const endHour = end.hour;
+    const endMinute = end.minute;
+    
+    const slotDuration = parseInt(settings.SlotDuration) || 10;
+    const bufferTime = parseInt(settings.BufferTime) || 15;
+    
+    // Get booked slots for this date
+    const bookedSlots = getBookedSlots(dateStr);
+    Logger.log("Booked Slots: " + JSON.stringify(bookedSlots));
+Logger.log("Date: " + dateStr);
+    
+    // Generate all possible slots
+    const allSlots = generateSlots(date, startHour, startMinute, endHour, endMinute, slotDuration, bufferTime);
+    
+    // Return ALL slots with status
+const slots = allSlots.map(function(slot) {
+
+  const normalized = slot.toUpperCase().trim();
+
+  return {
+    time: slot,
+    status: bookedSlots.includes(normalized)
+      ? "BOOKED"
+      : "AVAILABLE"
+  };
+
+});
+
+Logger.log("Booked Slots: " + JSON.stringify(bookedSlots));
+Logger.log("Generated Slots: " + JSON.stringify(slots));
+
+return {
+  slots: slots,
+  startHour: startHour,
+  endHour: endHour,
+  slotDuration: slotDuration,
+  bookingMode: settings.BookingMode || 'OPEN'
+};
+    
+  } catch (error) {
+    console.error('Error in getAvailableSlots:', error);
+    return { error: error.toString() };
+  }
+}
+
+/**
+ * Gets all booked slots for a specific date
+ * @param {string} dateStr - Date in YYYY-MM-DD format
+ * @returns {Array} Array of booked time strings
+ */
+function getBookedSlots(dateStr) {
+  try {
+    const sheet = getSheet();
+    const data = sheet.getDataRange().getValues();
+    const bookedSlots = [];
+    const settings = getSettings();
+    const timezone = settings.TimeZone || 'Asia/Kolkata';
+    
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      const appointmentDate = row[4]; // Appointment Date column
+      
+      if (!appointmentDate) continue;
+      
+      const aptDate = Utilities.formatDate(
+        new Date(appointmentDate),
+        timezone,
+        'yyyy-MM-dd'
+      );
+      
+      if (aptDate === dateStr && row[8] !== 'Cancelled') {
+        const bookedTime = Utilities.formatDate(
+  new Date(row[5]),
+  timezone,
+  "h:mm a"
+);
+
+bookedSlots.push(bookedTime.toUpperCase());
+      }
+    }
+    
+    return bookedSlots;
+  } catch (error) {
+    console.error('Error in getBookedSlots:', error);
+    return [];
+  }
+}
+
+/**
+ * Generates time slots for a date based on working hours
+ * @param {Date} date - Date object
+ * @param {number} startHour - Start hour (0-23)
+ * @param {number} startMinute - Start minute
+ * @param {number} endHour - End hour (0-23)
+ * @param {number} endMinute - End minute
+ * @param {number} slotDuration - Duration in minutes
+ * @param {number} bufferTime - Buffer in minutes
+ * @returns {Array} Array of formatted time strings
+ */
+function generateSlots(date, startHour, startMinute, endHour, endMinute, slotDuration, bufferTime) {
+  const slots = [];
+  const totalSlotTime = slotDuration + bufferTime;
+  
+  const currentTime = new Date(date);
+  currentTime.setHours(startHour, startMinute, 0, 0);
+  
+  const endTime = new Date(date);
+  endTime.setHours(endHour, endMinute, 0, 0);
+  
+  while (currentTime < endTime) {
+    const hours = currentTime.getHours();
+    const minutes = String(currentTime.getMinutes()).padStart(2, '0');
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    const hour12 = hours % 12 || 12;
+    const timeString = `${hour12}:${minutes} ${ampm}`;
+    
+    slots.push(timeString);
+    currentTime.setMinutes(currentTime.getMinutes() + totalSlotTime);
+  }
+  
+  return slots;
+}
+
+/**
+ * Checks if a specific time slot is available
+ * @param {string} dateStr - Date in YYYY-MM-DD format
+ * @param {string} timeStr - Time in format like "10:00 AM"
+ * @returns {boolean} True if available, false otherwise
+ */
+function checkSlotAvailability(dateStr, timeStr) {
+
+  const result = getAvailableSlots(dateStr);
+
+  if (result.error) return false;
+
+  const slot = result.slots.find(s => s.time === timeStr);
+
+  return slot && slot.status === "AVAILABLE";
+
+}
+
+// ============================================
+// BOOKING FUNCTIONS
+// ============================================
+
+/**
+ * Creates a new appointment booking
+ * @param {Object} data - Booking data from the form
+ * @returns {Object} Result object containing success status and booking details
+ */
+function createBooking(data) {
+  const lock = LockService.getScriptLock();
+  
+  try {
+    // Acquire lock to prevent duplicate submissions
+    if (!lock.tryLock(5000)) {
+      return { success: false, error: 'System is busy, please try again' };
+    }
+    
+    // Check booking mode
+    const settings = getSettings();
+    const bookingMode = settings.BookingMode || 'OPEN';
+    
+    if (bookingMode === 'READONLY') {
+      return { success: false, error: 'Booking is currently in read-only mode. Please try again later.' };
+    }
+    
+    if (bookingMode === 'PAUSED') {
+      return { success: false, error: settings.MaintenanceMessage || 'Booking is temporarily unavailable.' };
+    }
+    
+    // Validate all input data
+    validateBookingData(data);
+    
+    // Check slot availability
+const available = checkSlotAvailability(
+  data.appointmentDate,
+  data.appointmentTime
+);
+
+if (!available) {
+  return {
+    success: false,
+    error: 'This time slot is no longer available. Please select another time.'
+  };
+}
+
+// Parse appointment date and time
+const dateObj = new Date(data.appointmentDate);
+
+const match = data.appointmentTime.match(/(\d+):(\d+)\s*(AM|PM)/i);
+
+if (!match) {
+  return {
+    success: false,
+    error: 'Invalid appointment time.'
+  };
+}
+
+let hour = parseInt(match[1], 10);
+const minute = parseInt(match[2], 10);
+
+if (match[3].toUpperCase() === 'PM' && hour !== 12) {
+  hour += 12;
+}
+
+if (match[3].toUpperCase() === 'AM' && hour === 12) {
+  hour = 0;
+}
+
+dateObj.setHours(hour, minute, 0, 0);
+
+const endDate = new Date(dateObj);
+
+const slotDuration = parseInt(settings.SlotDuration || 10);
+
+endDate.setMinutes(endDate.getMinutes() + slotDuration);
+
+// FINAL Calendar Conflict Check
+if (hasCalendarConflict(dateObj, endDate)) {
+
+  return {
+    success: false,
+    error: 'This slot has already been booked.'
+  };
+
+}
+
+// Create calendar event with Google Meet
+const calendarResult = createCalendarEvent(data);
+    
+        
+    // Save booking to Google Sheet
+    const saved = saveBooking(
+      data,
+      calendarResult.eventId,
+      calendarResult.meetLink,
+      data.siteCode || '',
+      data.returnUrl || ''
+    );
+    
+    if (!saved) {
+      // Rollback calendar event if sheet save fails
+      if (calendarResult.eventId) {
+        try {
+          const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
+          if (calendar) {
+            const event = calendar.getEventById(calendarResult.eventId);
+            if (event) {
+              event.deleteEvent();
+            }
+          }
+        } catch (e) {
+          console.error('Failed to delete calendar event:', e);
+        }
+      }
+      return { success: false, error: 'Failed to save booking' };
+    }
+    
+    // Send confirmation email
+    sendConfirmationEmail(data, calendarResult.meetLink);
+    
+    return {
+      success: true,
+      eventId: calendarResult.eventId,
+      meetLink: calendarResult.meetLink
+    };
+    
+  } catch (error) {
+    console.error('Error in createBooking:', error);
+    return { success: false, error: error.message || 'Booking failed' };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Validates all booking data fields
+ * @param {Object} data - Booking data to validate
+ * @throws {Error} If validation fails with specific error message
+ */
+function validateBookingData(data) {
+  // Check required fields
+  const required = ['name', 'email', 'mobile', 'appointmentDate', 'appointmentTime'];
+  for (const field of required) {
+    if (!data[field] || data[field].trim() === '') {
+      throw new Error(`${field} is required`);
+    }
+  }
+  
+  // Validate email format
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(data.email)) {
+    throw new Error('Invalid email address');
+  }
+  
+  // Validate mobile number (10 digits, starting with 6-9)
+  const mobileRegex = /^[6-9]\d{9}$/;
+  if (!mobileRegex.test(data.mobile)) {
+    throw new Error('Mobile number must be 10 digits starting with 6-9');
+  }
+  
+  // Validate name length
+  if (data.name.length < 2) {
+    throw new Error('Name must be at least 2 characters');
+  }
+  
+  // Validate date is not in the past
+  const appointmentDate = new Date(data.appointmentDate);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (appointmentDate < today) {
+    throw new Error('Cannot book past dates');
+  }
+  
+  // Validate time format
+  const timeRegex = /^(1[0-2]|0?[1-9]):[0-5][0-9] (AM|PM)$/i;
+  if (!timeRegex.test(data.appointmentTime)) {
+    throw new Error('Invalid time format');
+  }
+}
+
+// ============================================
+// GOOGLE CALENDAR FUNCTIONS
+// ============================================
+
+function hasCalendarConflict(startTime, endTime) {
+  const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
+
+  const events = calendar.getEvents(startTime, endTime);
+
+  return events.length > 0;
+}
+/**
+ * Creates a Google Calendar event with Google Meet
+ * Uses Advanced Google Calendar API for proper Meet integration
+ * @param {Object} data - Booking data
+ * @returns {Object} Contains event ID and meet link
+ */
+function createCalendarEvent(data) {
+  try {
+    const settings = getSettings();
+    const timezone = settings.TimeZone || 'Asia/Kolkata';
+    
+    // Parse date and time
+    const dateObj = new Date(data.appointmentDate);
+    const timeParts = data.appointmentTime.match(/(\d+):(\d+)\s*(AM|PM)/i);
+    
+    if (!timeParts) {
+      throw new Error('Invalid time format');
+    }
+    
+    let hours = parseInt(timeParts[1]);
+    const minutes = parseInt(timeParts[2]);
+    const isPM = timeParts[3].toUpperCase() === 'PM';
+    
+    if (isPM && hours !== 12) hours += 12;
+    if (!isPM && hours === 12) hours = 0;
+    
+    dateObj.setHours(hours, minutes, 0, 0);
+    
+    // Calculate end time
+    const slotDuration = parseInt(settings.SlotDuration) || 10;
+    const endDate = new Date(dateObj.getTime());
+    endDate.setMinutes(endDate.getMinutes() + slotDuration);
+    
+    // Format dates for API
+    const startDateTime = dateObj.toISOString();
+    const endDateTime = endDate.toISOString();
+    
+    // Prepare event description
+    const description = `
+Name: ${data.name}
+Mobile: ${data.mobile}
+Email: ${data.email}
+Site: ${data.siteCode || 'N/A'}
+
+Remarks:
+${data.remarks || 'None'}
+    `.trim();
+    
+    // Generate unique request ID for conference creation
+    const requestId = 'meet-' + new Date().getTime() + '-' + Math.random().toString(36).substring(7);
+    
+    // Build calendar event using Advanced Calendar API
+    const eventResource = {
+      summary: `Appointment - ${data.name}`,
+      location: 'Google Meet',
+      description: description,
+      start: {
+        dateTime: startDateTime,
+        timeZone: timezone
+      },
+      end: {
+        dateTime: endDateTime,
+        timeZone: timezone
+      },
+      attendees: [
+        { email: data.email, responseStatus: 'needsAction' }
+      ],
+      conferenceData: {
+        createRequest: {
+          conferenceSolutionKey: {
+            type: 'hangoutsMeet'
+          },
+          requestId: requestId
+        }
+      },
+      guestsCanSeeOtherGuests: false,
+      guestsCanModify: false,
+      guestsCanInviteOthers: false,
+      sendUpdates: 'all'
+    };
+    
+    // Insert event with conference data
+    const calendarId = CONFIG.CALENDAR_ID;
+    const event = Calendar.Events.insert(eventResource, calendarId, {
+      conferenceDataVersion: 1,
+      sendUpdates: 'all'
+    });
+    
+    // Extract the Google Meet link from the response
+    let meetLink = '';
+    if (event && event.conferenceData && event.conferenceData.entryPoints) {
+      const entryPoints = event.conferenceData.entryPoints;
+      for (const entry of entryPoints) {
+        if (entry.entryPointType === 'video' && entry.uri) {
+          meetLink = entry.uri;
+          break;
+        }
+      }
+    }
+    
+    return {
+      eventId: event.id,
+      meetLink: meetLink
+    };
+    
+  } catch (error) {
+    console.error('Error creating calendar event:', error);
+    throw new Error('Failed to create calendar event: ' + error.message);
+  }
+}
+
+// ============================================
+// EMAIL FUNCTIONS
+// ============================================
+
+/**
+ * Sends confirmation email with meeting details
+ * @param {Object} data - Booking data
+ * @param {string} meetLink - Google Meet URL
+ */
+function sendConfirmationEmail(data, meetLink) {
+  try {
+    const settings = getSettings();
+    const timezone = settings.TimeZone || 'Asia/Kolkata';
+    const subject = 'Appointment Confirmed';
+    
+    // Format date for display
+    const dateObj = new Date(data.appointmentDate);
+    const formattedDate = Utilities.formatDate(
+      dateObj,
+      timezone,
+      'EEEE, MMMM d, yyyy'
+    );
+    
+    // Build HTML email
+    const htmlBody = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #2563EB; color: white; padding: 25px; text-align: center; border-radius: 8px 8px 0 0; }
+          .header h2 { margin: 0; font-size: 24px; }
+          .content { background: #f8f9fa; padding: 30px; border-radius: 0 0 8px 8px; }
+          .details { background: white; padding: 20px; border-radius: 6px; margin: 20px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+          .detail-row { padding: 8px 0; border-bottom: 1px solid #eee; }
+          .detail-row:last-child { border-bottom: none; }
+          .label { font-weight: 600; color: #555; display: inline-block; min-width: 100px; }
+          .value { color: #333; }
+          .meet-box { background: #e8f5e9; padding: 25px; border-radius: 8px; margin: 25px 0; text-align: center; border: 2px solid #16A34A; }
+          .meet-box h3 { margin: 0 0 10px 0; color: #2e7d32; }
+          .btn { display: inline-block; background: #16A34A; color: white; padding: 14px 35px; text-decoration: none; border-radius: 6px; font-weight: 600; margin: 10px 0; }
+          .btn:hover { background: #15803D; }
+          .info-box { background: #e3f2fd; padding: 15px; border-radius: 6px; margin: 20px 0; border-left: 4px solid #2563EB; }
+          .info-box ul { margin: 10px 0 0 20px; }
+          .support-box { background: #fff3e0; padding: 15px; border-radius: 6px; margin: 20px 0; border-left: 4px solid #F59E0B; }
+          .support-box p { margin: 5px 0; }
+          .footer { text-align: center; padding: 20px; font-size: 12px; color: #999; border-top: 1px solid #eee; margin-top: 30px; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h2>Appointment Confirmed</h2>
+        </div>
+        <div class="content">
+          <p>Dear <strong>${data.name}</strong>,</p>
+          <p>Your appointment has been confirmed. Please find the details below:</p>
+          
+          <div class="details">
+            <div class="detail-row">
+              <span class="label">Date:</span>
+              <span class="value">${formattedDate}</span>
+            </div>
+            <div class="detail-row">
+              <span class="label">Time:</span>
+              <span class="value">${data.appointmentTime}</span>
+            </div>
+            <div class="detail-row">
+              <span class="label">Duration:</span>
+              <span class="value">${parseInt(settings.SlotDuration) || 10} minutes</span>
+            </div>
+            ${data.remarks ? `
+              <div class="detail-row">
+                <span class="label">Remarks:</span>
+                <span class="value">${data.remarks}</span>
+              </div>
+            ` : ''}
+          </div>
+          
+          ${meetLink ? `
+            <div class="meet-box">
+              <h3>🔗 Join Your Meeting</h3>
+              <p>Click the button below to join at the scheduled time</p>
+              <a href="${meetLink}" class="btn" target="_blank">Join Meeting</a>
+              <p style="font-size: 14px; color: #666; margin-top: 10px;">
+                Meeting Link: <br><span style="word-break: break-all;">${meetLink}</span>
+              </p>
+            </div>
+          ` : `
+            <div class="meet-box" style="background: #fff3cd; border-color: #F59E0B;">
+              <h3 style="color: #856404;">Meeting Link</h3>
+              <p>Your Google Meet link will be available in your Google Calendar invitation.</p>
+            </div>
+          `}
+          
+          <div class="info-box">
+            <strong>📌 Important Information</strong>
+            <ul>
+              <li>Please join 2-3 minutes before the scheduled time</li>
+              <li>Ensure your camera and microphone are working</li>
+              <li>A stable internet connection is recommended</li>
+            </ul>
+          </div>
+          
+          <div class="support-box">
+            <strong>📞 Need Assistance?</strong>
+            <p>If you need assistance, please contact the website from which you booked your appointment.</p>
+          </div>
+          
+          <div class="footer">
+            <p>This is an automated confirmation. Please do not reply to this email.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+    
+    // Build plain text email
+    const plainText = `
+Appointment Confirmed
+
+Dear ${data.name},
+
+Your appointment has been confirmed.
+
+Appointment Details:
+-------------------
+Date: ${formattedDate}
+Time: ${data.appointmentTime}
+Duration: ${parseInt(settings.SlotDuration) || 10} minutes
+${data.remarks ? `Remarks: ${data.remarks}` : ''}
+
+${meetLink ? `Join Meeting: ${meetLink}` : 'Meeting link available in Google Calendar invitation'}
+
+Important Information:
+- Please join 2-3 minutes before the scheduled time
+- Ensure your camera and microphone are working
+- A stable internet connection is recommended
+
+Need Assistance?
+If you need assistance, please contact the website from which you booked your appointment.
+
+This is an automated confirmation. Please do not reply to this email.
+    `;
+    
+    // Send email
+    GmailApp.sendEmail(
+      data.email,
+      subject,
+      plainText,
+      {
+        htmlBody: htmlBody,
+        name: 'Appointment Booking'
+      }
+    );
+    // Send notification to administrator
+if (settings.AdminEmail) {
+
+  const adminSubject = "New Appointment Booked";
+
+  const adminBody =
+`A new appointment has been booked.
+
+Name: ${data.name}
+
+Email: ${data.email}
+
+Mobile: ${data.mobile}
+
+Date: ${formattedDate}
+
+Time: ${data.appointmentTime}
+
+Remarks:
+${data.remarks || "N/A"}
+
+Site:
+${data.siteCode || "N/A"}
+
+Google Meet:
+${meetLink || "Available in Calendar"}
+`;
+
+  GmailApp.sendEmail(
+    settings.AdminEmail,
+    adminSubject,
+    adminBody
+  );
+}
+  } catch (error) {
+    console.error('Error sending confirmation email:', error);
+  }
+}
+
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
+
+/**
+ * Includes an HTML file in the template
+ * @param {string} filename - Name of the HTML file (without extension)
+ * @returns {string} HTML content of the file
+ */
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
+/**
+ * Gets client-side configuration
+ * @returns {Object} Configuration object for the frontend
+ */
+function getClientConfig() {
+  try {
+    const settings = getSettings();
+    const workingHours = getAllWorkingHours();
+    
+    return {
+      slotDuration: parseInt(settings.SlotDuration) || 10,
+      bufferTime: parseInt(settings.BufferTime) || 15,
+      timeZone: settings.TimeZone || 'Asia/Kolkata',
+      bookingMode: settings.BookingMode || 'OPEN',
+      redirectDelay: parseInt(settings.RedirectDelay) || 3,
+      workingHours: workingHours,
+      siteCode: '',
+      returnUrl: ''
+    };
+  } catch (error) {
+    console.error('Error in getClientConfig:', error);
+    return {
+      slotDuration: 10,
+      bufferTime: 15,
+      timeZone: 'Asia/Kolkata',
+      bookingMode: 'OPEN',
+      redirectDelay: 3,
+      workingHours: {}
+    };
+  }
+}
+
+/**
+ * Get the return URL for a site code
+ * @param {string} siteCode - Site code
+ * @returns {string} Return URL
+ */
+function getReturnUrl(siteCode) {
+  return getRedirectUrl(siteCode);
+}
+
+// ============================================
+// SETUP FUNCTIONS
+// ============================================
+
+/**
+ * Initialize all sheets with default values
+ * @returns {Object} Setup result
+ */
+function setupAppointmentPortal() {
+  try {
+    // Create Settings sheet
+    const settingsSheet = getOrCreateSheet('Settings', ['Setting', 'Value']);
+    const settings = {
+      'BookingMode': 'OPEN',
+      'SlotDuration': '10',
+      'BufferTime': '15',
+      'TimeZone': 'Asia/Kolkata',
+      'DefaultStartTime': '11:00',
+      'DefaultEndTime': '18:00',
+      'RedirectDelay': '3',
+      'MaintenanceMessage': 'Booking is temporarily unavailable. Please try again later.',
+      'RedirectDefault': ''
+    };
+    
+    for (const [key, value] of Object.entries(settings)) {
+      settingsSheet.appendRow([key, value]);
+    }
+    
+    // Create WorkingHours sheet
+    const workingHoursSheet = getOrCreateSheet('WorkingHours', ['Day', 'Enabled', 'Start Time', 'End Time']);
+    const defaultHours = [
+      ['Monday', 'Yes', '11:00', '18:00'],
+      ['Tuesday', 'Yes', '11:00', '18:00'],
+      ['Wednesday', 'Yes', '11:00', '18:00'],
+      ['Thursday', 'Yes', '11:00', '18:00'],
+      ['Friday', 'Yes', '11:00', '18:00'],
+      ['Saturday', 'Yes', '11:00', '16:00'],
+      ['Sunday', 'No', '', '']
+    ];
+    
+    for (const row of defaultHours) {
+      workingHoursSheet.appendRow(row);
+    }
+    
+    // Create BlockedDates sheet
+    getOrCreateSheet('BlockedDates', ['Date', 'Enabled', 'Reason']);
+    
+    // Create Holidays sheet
+    const holidaysSheet = getOrCreateSheet('Holidays', ['Month', 'Day', 'Enabled', 'Reason']);
+    const defaultHolidays = [
+      ['1', '26', 'Yes', 'Republic Day'],
+      ['8', '15', 'Yes', 'Independence Day'],
+      ['10', '2', 'Yes', 'Gandhi Jayanti']
+    ];
+    
+    for (const row of defaultHolidays) {
+      holidaysSheet.appendRow(row);
+    }
+    
+    // Create Redirects sheet
+    const redirectsSheet = getOrCreateSheet('Redirects', ['SiteCode', 'RedirectURL', 'Active']);
+    const defaultRedirects = [
+      ['NGO', 'https://registeryourngo.com/thank-you', 'Yes'],
+      ['ST', 'https://storganics.in/thank-you', 'Yes']
+    ];
+    
+    for (const row of defaultRedirects) {
+      redirectsSheet.appendRow(row);
+    }
+    
+    // Create Appointments sheet
+    getOrCreateSheet('Appointments', [
+      'Name', 'Email', 'Mobile', 'Remarks', 'Appointment Date',
+      'Appointment Time', 'Calendar Event ID', 'Google Meet Link',
+      'Status', 'Created On', 'Site Code', 'Redirect URL'
+    ]);
+    
+    return {
+      success: true,
+      message: 'Setup completed successfully!',
+      sheets: {
+        settings: 'Settings',
+        workingHours: 'WorkingHours',
+        blockedDates: 'BlockedDates',
+        holidays: 'Holidays',
+        redirects: 'Redirects',
+        appointments: 'Appointments'
+      }
+    };
+    
+  } catch (error) {
+    console.error('Error in setupAppointmentPortal:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// ============================================
+// VALIDATE CONFIGURATION
+// ============================================
+
+/**
+ * Validate the entire configuration
+ * @returns {Object} Validation result
+ */
+function validateConfig() {
+  try {
+    const settings = getSettings();
+    const workingHours = getAllWorkingHours();
+    
+    // Check if at least one working day is configured
+    let hasWorkingDay = false;
+    for (const [day, hours] of Object.entries(workingHours)) {
+      if (hours.enabled) {
+        hasWorkingDay = true;
+        break;
+      }
+    }
+    
+    if (!hasWorkingDay) {
+      return {
+        valid: false,
+        error: 'No working days configured. Please enable at least one day in WorkingHours sheet.'
+      };
+    }
+    
+    // Test spreadsheet access
+    try {
+      const ss = getSpreadsheet();
+      const sheets = ss.getSheets();
+    } catch (e) {
+      return {
+        valid: false,
+        error: 'Spreadsheet not accessible. Check SPREADSHEET_ID in Config.gs.'
+      };
+    }
+    
+    // Test calendar access
+    try {
+      const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
+      if (!calendar) {
+        return {
+          valid: false,
+          error: 'Calendar not found. Check CALENDAR_ID in Config.gs.'
+        };
+      }
+    } catch (e) {
+      return {
+        valid: false,
+        error: 'Calendar not accessible. Check CALENDAR_ID in Config.gs.'
+      };
+    }
+    
+    return {
+      valid: true,
+      message: 'Configuration is valid!',
+      settings: settings,
+      workingHours: workingHours
+    };
+    
+  } catch (error) {
+    return {
+      valid: false,
+      error: error.message
+    };
+  }
+}
+
+function testSlots() {
+  const result = getAvailableSlots("2026-06-29"); // use a date that has bookings
+  Logger.log(JSON.stringify(result));
+}
+
+// ============================================
+// END OF FILE
+// ============================================

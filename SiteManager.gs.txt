@@ -1,0 +1,697 @@
+<script>
+  // ============================================
+  // SECURE APPOINTMENT PORTAL v2.0
+  // Frontend JavaScript
+  // ============================================
+
+  (function() {
+    'use strict';
+
+    // ============================================
+    // DOM REFERENCES
+    // ============================================
+    const form = document.getElementById('bookingForm');
+    const bookingSection = document.querySelector('.booking-section');
+    const nameInput = document.getElementById('name');
+    const emailInput = document.getElementById('email');
+    const mobileInput = document.getElementById('mobile');
+    const remarksInput = document.getElementById('remarks');
+    const dateInput = document.getElementById('appointmentDate');
+    const slotContainer = document.getElementById('slotContainer');
+    const timeSelect = document.getElementById('appointmentTime');
+    const submitBtn = document.getElementById('submitBtn');
+    const loadingOverlay = document.getElementById('loadingOverlay');
+    const loadingMessage = document.getElementById('loadingMessage');
+    const successScreen = document.getElementById('successScreen');
+    const returnBtn = document.getElementById('returnBtn');
+    const generalError = document.getElementById('generalError');
+
+    // ============================================
+    // STATE
+    // ============================================
+    let selectedSlot = null;
+    let isSubmitting = false;
+    let returnUrl = null;
+    let siteCode = null;
+    let config = null;
+    let redirectDelay = 3;
+
+    // ============================================
+    // INITIALIZATION
+    // ============================================
+
+    /**
+     * Initialize the application on page load
+     */
+    function init() {
+      // Ensure form is visible and success screen is hidden on load
+      showBookingForm();
+      hideSuccessScreen();
+      hideLoading();
+
+      // Get site code and return URL from query string
+      const urlParams = new URLSearchParams(window.location.search);
+      siteCode = urlParams.get('site') || '';
+      
+      // Get return URL from server
+      google.script.run
+  .withSuccessHandler(function(url) {
+
+    returnUrl = url;
+
+if (returnBtn) {
+    returnBtn.style.display = returnUrl ? 'inline-block' : 'none';
+}
+
+  })
+  .withFailureHandler(function(error) {
+
+    console.warn('Failed to get return URL:', error);
+
+  })
+  .getReturnUrl(siteCode);
+
+      // Set current year in footer
+      const yearEl = document.getElementById('currentYear');
+      if (yearEl) {
+        yearEl.textContent = new Date().getFullYear();
+      }
+
+      // Set minimum date to today
+      const today = new Date().toISOString().split('T')[0];
+      dateInput.setAttribute('min', today);
+
+      // Set maximum date to 30 days from now
+      const maxDate = new Date();
+      maxDate.setDate(maxDate.getDate() + 30);
+      dateInput.setAttribute('max', maxDate.toISOString().split('T')[0]);
+
+      // Set default date to today
+      dateInput.value = today;
+
+      // Load client configuration
+      loadClientConfig();
+
+      // Attach event listeners
+      attachEventListeners();
+
+      // Load slots for today
+      loadAvailableSlots(today);
+
+      // Focus the first input
+      nameInput.focus();
+
+      console.log('Secure Appointment Portal v2.0 initialized');
+    }
+
+    // ============================================
+    // UI CONTROLS
+    // ============================================
+
+    /**
+     * Show the booking form, hide success screen
+     */
+    function showBookingForm() {
+      if (bookingSection) {
+        bookingSection.style.display = 'block';
+      }
+      if (form) {
+        form.style.display = 'block';
+      }
+    }
+
+    /**
+     * Hide the booking form
+     */
+    function hideBookingForm() {
+      if (bookingSection) {
+        bookingSection.style.display = 'none';
+      }
+      if (form) {
+        form.style.display = 'none';
+      }
+    }
+
+    /**
+     * Show the success screen
+     */
+    function showSuccessScreen() {
+      if (successScreen) {
+        successScreen.hidden = false;
+      }
+      // Hide booking form when success is shown
+      hideBookingForm();
+    }
+
+    /**
+     * Hide the success screen
+     */
+    function hideSuccessScreen() {
+      if (successScreen) {
+        successScreen.hidden = true;
+      }
+    }
+
+    /**
+     * Show loading overlay with message
+     * @param {string} message - Loading message to display
+     */
+    function showLoading(message) {
+      if (loadingMessage) {
+        loadingMessage.textContent = message || 'Loading...';
+      }
+      if (loadingOverlay) {
+        loadingOverlay.hidden = false;
+      }
+    }
+
+    /**
+     * Hide loading overlay
+     */
+    function hideLoading() {
+      if (loadingOverlay) {
+        loadingOverlay.hidden = true;
+      }
+    }
+
+    // ============================================
+    // CONFIGURATION
+    // ============================================
+
+    /**
+     * Load client configuration from server
+     */
+    function loadClientConfig() {
+      google.script.run
+        .withSuccessHandler(function(configData) {
+          config = configData;
+          if (config && config.slotDuration) {
+            // Update duration display if needed
+          }
+          if (config && config.redirectDelay) {
+            redirectDelay = parseInt(config.redirectDelay) || 3;
+          }
+        })
+        .withFailureHandler(function(error) {
+          console.warn('Failed to load client config:', error);
+        })
+        .getClientConfig();
+    }
+
+    // ============================================
+    // EVENT LISTENERS
+    // ============================================
+
+    /**
+     * Attach all event listeners
+     */
+    function attachEventListeners() {
+      // Date change handler
+      dateInput.addEventListener('change', function() {
+        const date = this.value;
+        if (date) {
+          clearSlotSelection();
+          loadAvailableSlots(date);
+        } else {
+          showSlotPlaceholder('Please select a date.');
+        }
+      });
+
+      // Form submission
+      form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        if (!isSubmitting) {
+          handleBooking();
+        }
+      });
+
+      // Return button
+      returnBtn.addEventListener('click', function() {
+        redirectToReturnUrl();
+      });
+
+      // Keyboard shortcut: Escape to close success screen
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && successScreen && !successScreen.hidden) {
+          redirectToReturnUrl();
+        }
+      });
+    }
+
+    // ============================================
+    // SLOT LOADING
+    // ============================================
+
+    /**
+     * Load available slots for a given date
+     * @param {string} date - Date in YYYY-MM-DD format
+     */
+    function loadAvailableSlots(date) {
+      showLoading('Checking available time slots...');
+
+      google.script.run
+        .withSuccessHandler(function(response) {
+          hideLoading();
+          renderSlots(response);
+        })
+        .withFailureHandler(function(error) {
+          hideLoading();
+          console.error('Error loading slots:', error);
+          showSlotError('Failed to load available slots. Please try again.');
+        })
+        .getAvailableSlots(date);
+    }
+
+    /**
+     * Render slots in the container
+     * @param {Object} response - Response from getAvailableSlots
+     */
+    function renderSlots(response) {
+      // Clear previous slots
+      slotContainer.innerHTML = '';
+
+      if (response.error) {
+        showSlotError(response.error);
+        return;
+      }
+
+      if (!response.slots || response.slots.length === 0) {
+        showNoSlots();
+        return;
+      }
+
+      // Check booking mode
+      if (response.bookingMode === 'READONLY') {
+        // Show slots but disable booking
+        const modeWarning = document.createElement('p');
+        modeWarning.className = 'no-slots';
+        modeWarning.textContent = '⚠️ Booking is currently in read-only mode. Please try again later.';
+        slotContainer.appendChild(modeWarning);
+      }
+
+      // Create slot grid
+      const grid = document.createElement('div');
+      grid.className = 'slot-grid';
+      grid.setAttribute('role', 'radiogroup');
+      grid.setAttribute('aria-label', 'Available time slots');
+
+      const isReadOnly = response.bookingMode === 'READONLY';
+
+      response.slots.forEach(function(slot) {
+        const button = document.createElement('button');
+
+button.type = 'button';
+
+button.className = 'slot-button';
+
+button.dataset.time = slot.time;
+
+button.setAttribute('role','radio');
+button.setAttribute('aria-checked','false');
+button.setAttribute('tabindex','0');
+
+if(slot.status==="AVAILABLE"){
+
+    button.textContent = slot.time;
+
+    button.classList.add("available");
+
+}
+else{
+
+    button.textContent = slot.time + " (Booked)";
+
+    button.classList.add("booked");
+
+    button.disabled = true;
+
+}
+
+if(isReadOnly){
+
+    button.disabled = true;
+
+}
+
+button.addEventListener('click',function(e){
+
+    e.preventDefault();
+
+    if(button.disabled) return;
+
+    handleSlotSelection(this);
+
+});
+
+button.addEventListener('keydown',function(e){
+
+    if((e.key==="Enter" || e.key===" ") && !button.disabled){
+
+        e.preventDefault();
+
+        handleSlotSelection(this);
+
+    }
+
+});
+
+grid.appendChild(button);
+      });
+
+      slotContainer.appendChild(grid);
+
+      // If read-only, disable submit button
+      if (isReadOnly) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Booking Disabled';
+      } else {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Confirm Appointment';
+      }
+    }
+
+    /**
+     * Handle slot selection
+     * @param {HTMLElement} button - The clicked slot button
+     */
+    function handleSlotSelection(button) {
+      // Deselect previous slot
+      if (selectedSlot) {
+        selectedSlot.classList.remove('slot-selected');
+        selectedSlot.setAttribute('aria-checked', 'false');
+      }
+
+      // Select new slot
+      selectedSlot = button;
+      selectedSlot.classList.add('slot-selected');
+      selectedSlot.setAttribute('aria-checked', 'true');
+
+      // Update hidden select for form validation
+      timeSelect.value = selectedSlot.dataset.time;
+
+      // Enable submit button
+      submitBtn.disabled = false;
+
+      // Clear any time errors
+      hideError('timeError');
+    }
+
+    /**
+     * Clear slot selection
+     */
+    function clearSlotSelection() {
+      if (selectedSlot) {
+        selectedSlot.classList.remove('slot-selected');
+        selectedSlot.setAttribute('aria-checked', 'false');
+        selectedSlot = null;
+      }
+      timeSelect.value = '';
+      submitBtn.disabled = true;
+    }
+
+    /**
+     * Show slot placeholder message
+     * @param {string} message - Message to display
+     */
+    function showSlotPlaceholder(message) {
+      slotContainer.innerHTML = '';
+      const placeholder = document.createElement('p');
+      placeholder.className = 'slot-placeholder';
+      placeholder.textContent = message;
+      slotContainer.appendChild(placeholder);
+      clearSlotSelection();
+    }
+
+    /**
+     * Show slot error message
+     * @param {string} message - Error message
+     */
+    function showSlotError(message) {
+      slotContainer.innerHTML = '';
+      const errorEl = document.createElement('p');
+      errorEl.className = 'no-slots';
+      errorEl.textContent = '⚠️ ' + message;
+      slotContainer.appendChild(errorEl);
+      clearSlotSelection();
+    }
+
+    /**
+     * Show no slots available message
+     */
+    function showNoSlots() {
+      slotContainer.innerHTML = '';
+      const message = document.createElement('p');
+      message.className = 'no-slots';
+      message.textContent = 'No appointments available on this date. Please select another date.';
+      slotContainer.appendChild(message);
+      clearSlotSelection();
+    }
+
+    // ============================================
+    // BOOKING HANDLING
+    // ============================================
+
+    /**
+     * Handle booking submission
+     */
+    function handleBooking() {
+      // Validate form
+      if (!validateForm()) {
+        return;
+      }
+
+      // Prevent double submission
+      isSubmitting = true;
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = 'Booking your appointment...';
+
+      // Show booking loader
+      showLoading('Booking your appointment...');
+
+      // Collect data
+      const data = {
+        name: nameInput.value.trim(),
+        email: emailInput.value.trim(),
+        mobile: mobileInput.value.trim(),
+        remarks: remarksInput.value.trim(),
+        appointmentDate: dateInput.value,
+        appointmentTime: selectedSlot.dataset.time,
+        siteCode: siteCode,
+        returnUrl: returnUrl
+      };
+
+      // Call server to create booking
+      google.script.run
+        .withSuccessHandler(function(response) {
+          hideLoading();
+          if (response.success) {
+            handleBookingSuccess(response);
+          } else {
+            handleBookingError(response.error || 'Booking failed. Please try again.');
+          }
+        })
+        .withFailureHandler(function(error) {
+          hideLoading();
+          console.error('Booking error:', error);
+          handleBookingError('An unexpected error occurred. Please try again.');
+        })
+        .createBooking(data);
+    }
+
+    /**
+     * Handle successful booking
+     * @param {Object} response - Response from createBooking
+     */
+    function handleBookingSuccess(response) {
+      // Reset form state
+      isSubmitting = false;
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = 'Confirm Appointment';
+
+      // Show success screen (this hides the booking form)
+      showSuccessScreen();
+
+      // Set focus to return button for accessibility
+      if (returnUrl && returnBtn) {
+        returnBtn.focus();
+      }
+
+      // Auto-redirect after configured delay if return URL exists
+      if (returnUrl) {
+        setTimeout(function() {
+          redirectToReturnUrl();
+        }, redirectDelay * 1000);
+      }
+    }
+
+    /**
+     * Handle booking error
+     * @param {string} errorMessage - Error message to display
+     */
+    function handleBookingError(errorMessage) {
+      isSubmitting = false;
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = 'Confirm Appointment';
+
+      // Ensure booking form is visible
+      showBookingForm();
+      hideSuccessScreen();
+
+      // Show error
+      showGeneralError(errorMessage);
+
+      // Scroll to error
+      generalError.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    // ============================================
+    // FORM VALIDATION
+    // ============================================
+
+    /**
+     * Validate the entire form
+     * @returns {boolean} True if valid, false otherwise
+     */
+    function validateForm() {
+      let isValid = true;
+
+      // Clear previous errors
+      clearAllErrors();
+
+      // Validate name
+      const name = nameInput.value.trim();
+      if (name.length < 2) {
+        showError('nameError', 'Name must be at least 2 characters');
+        isValid = false;
+      }
+
+      // Validate email
+      const email = emailInput.value.trim();
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        showError('emailError', 'Please enter a valid email address');
+        isValid = false;
+      }
+
+      // Validate mobile
+      const mobile = mobileInput.value.trim();
+      const mobileRegex = /^[6-9]\d{9}$/;
+      if (!mobileRegex.test(mobile)) {
+        showError('mobileError', 'Mobile number must be 10 digits starting with 6-9');
+        isValid = false;
+      }
+
+      // Validate date
+      const date = dateInput.value;
+      if (!date) {
+        showError('dateError', 'Please select a date');
+        isValid = false;
+      } else {
+        // Check if date is in the past
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const selectedDate = new Date(date);
+        if (selectedDate < today) {
+          showError('dateError', 'Cannot book past dates');
+          isValid = false;
+        }
+      }
+
+      // Validate slot selection
+      if (!selectedSlot) {
+        showError('timeError', 'Please select a time slot');
+        isValid = false;
+      }
+
+      // General error handling
+      if (!isValid) {
+        // Scroll to first error
+        const firstError = document.querySelector('.error-message.show');
+        if (firstError) {
+          firstError.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
+
+      return isValid;
+    }
+
+    /**
+     * Show error message for a field
+     * @param {string} elementId - ID of error container
+     * @param {string} message - Error message
+     */
+    function showError(elementId, message) {
+      const errorEl = document.getElementById(elementId);
+      if (errorEl) {
+        errorEl.textContent = message;
+        errorEl.classList.add('show');
+      }
+    }
+
+    /**
+     * Hide error message for a field
+     * @param {string} elementId - ID of error container
+     */
+    function hideError(elementId) {
+      const errorEl = document.getElementById(elementId);
+      if (errorEl) {
+        errorEl.classList.remove('show');
+        errorEl.textContent = '';
+      }
+    }
+
+    /**
+     * Clear all error messages
+     */
+    function clearAllErrors() {
+      document.querySelectorAll('.error-message').forEach(function(el) {
+        el.classList.remove('show');
+        el.textContent = '';
+      });
+      if (generalError) {
+        generalError.style.display = 'none';
+        generalError.textContent = '';
+        generalError.classList.remove('show');
+      }
+    }
+
+    /**
+     * Show general error message
+     * @param {string} message - Error message
+     */
+    function showGeneralError(message) {
+      if (generalError) {
+        generalError.textContent = message;
+        generalError.style.display = 'block';
+        generalError.classList.add('show');
+      }
+    }
+
+    // ============================================
+    // REDIRECT HELPERS
+    // ============================================
+
+    /**
+     * Redirect to the return URL
+     */
+    function redirectToReturnUrl() {
+      if (returnUrl) {
+        window.location.href = returnUrl;
+      } else {
+        console.warn('No return URL provided. Staying on success page.');
+      }
+    }
+
+    // ============================================
+    // INITIALIZE APPLICATION
+    // ============================================
+
+    // Wait for DOM to be fully loaded
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
+    } else {
+      init();
+    }
+
+  })();
+</script>
